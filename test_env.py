@@ -62,6 +62,7 @@ def test_config():
     print(f"  数据库路径: {config.database_path}")
     print(f"  最大并发数: {config.max_workers}")
     print(f"  调试模式: {config.debug}")
+    print(f"  企业微信消息格式: {config.wechat_message_format} (环境变量 WECHAT_MESSAGE_FORMAT)")
     
     print_section("API 配置")
     print(f"  Tushare Token: {'已配置 ✓' if config.tushare_token else '未配置 ✗'}")

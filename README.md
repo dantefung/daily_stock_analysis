@@ -72,6 +72,7 @@
 | Secret 名称 | 说明 | 必填 |
 |------------|------|:----:|
 | `WECHAT_WEBHOOK_URL` | 企业微信 Webhook URL | 可选 |
+| `WECHAT_MESSAGE_FORMAT` | 企业微信发送格式：`text`（默认）或 `markdown`（可选） | 可选 |
 | `FEISHU_WEBHOOK_URL` | 飞书 Webhook URL | 可选 |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot Token（@BotFather 获取） | 可选 |
 | `TELEGRAM_CHAT_ID` | Telegram Chat ID | 可选 |

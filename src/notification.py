@@ -135,6 +135,11 @@ class NotificationService:
         # 各渠道的 Webhook URL
         self._wechat_url = config.wechat_webhook_url
         self._feishu_url = getattr(config, 'feishu_webhook_url', None)
+        # 企业微信发送格式（text | markdown），默认 text
+        self._wechat_message_format = getattr(config, 'wechat_message_format', 'text') or 'text'
+        if self._wechat_message_format not in ('text', 'markdown'):
+            logger.warning(f"无效的 WECHAT_MESSAGE_FORMAT={self._wechat_message_format}，回退为 'text'")
+            self._wechat_message_format = 'text'
         
         # Telegram 配置
         self._telegram_config = {
@@ -1126,19 +1131,19 @@ class NotificationService:
         """
         推送消息到企业微信机器人
         
-        企业微信 Webhook 消息格式：
+        企业微信 Webhook 消息格式（发送为纯文本）：
         {
-            "msgtype": "markdown",
-            "markdown": {
-                "content": "Markdown 内容"
+            "msgtype": "text",
+            "text": {
+                "content": "纯文本内容"
             }
         }
         
-        注意：企业微信 Markdown 限制 4096 字节（非字符），超长内容会自动分批发送
+        注意：企业微信文本消息限制 4096 字节（非字符），本系统会将发送内容转换为纯文本并在必要时分批发送。
         可通过环境变量 WECHAT_MAX_BYTES 调整限制值
         
         Args:
-            content: Markdown 格式的消息内容
+            content: 原始消息内容（会转换为纯文本后发送）
             
         Returns:
             是否发送成功
@@ -1149,17 +1154,31 @@ class NotificationService:
         
         max_bytes = self._wechat_max_bytes  # 从配置读取，默认 4000 字节
         
-        # 检查字节长度，超长则分批发送
-        content_bytes = len(content.encode('utf-8'))
-        if content_bytes > max_bytes:
-            logger.info(f"消息内容超长({content_bytes}字节/{len(content)}字符)，将分批发送")
-            return self._send_wechat_chunked(content, max_bytes)
-        
-        try:
-            return self._send_wechat_message(content)
-        except Exception as e:
-            logger.error(f"发送企业微信消息失败: {e}")
-            return False
+        # 根据配置决定发送格式（text 或 markdown）
+        logger.debug(f"企业微信发送格式: {self._wechat_message_format}")
+        if self._wechat_message_format == 'markdown':
+            # 使用原始 Markdown 字节数进行长度检查/分片
+            content_bytes = len(content.encode('utf-8'))
+            if content_bytes > max_bytes:
+                logger.info(f"企业微信(Markdown)消息超长({content_bytes}字节)，将分批发送")
+                return self._send_wechat_chunked(content, max_bytes)
+            try:
+                return self._send_wechat_message(content)
+            except Exception as e:
+                logger.error(f"发送企业微信消息失败: {e}")
+                return False
+        else:
+            # text 模式（默认）：把 Markdown 转为纯文本再发送
+            plain = self._markdown_to_plaintext(content)
+            content_bytes = len(plain.encode('utf-8'))
+            if content_bytes > max_bytes:
+                logger.info(f"企业微信(纯文本)消息超长({content_bytes}字节)，将分批发送为纯文本")
+                return self._send_wechat_chunked(content, max_bytes)
+            try:
+                return self._send_wechat_message(plain)
+            except Exception as e:
+                logger.error(f"发送企业微信消息失败: {e}")
+                return False
     
     def _send_wechat_chunked(self, content: str, max_bytes: int) -> bool:
         """
@@ -1168,17 +1187,27 @@ class NotificationService:
         按股票分析块（以 --- 或 ### 分隔）智能分割，确保每批不超过限制
         
         Args:
-            content: 完整消息内容
-            max_bytes: 单条消息最大字节数
+            content: 完整消息内容（原始 Markdown）
+            max_bytes: 单条消息最大字节数（以最终发送的纯文本为准）
             
         Returns:
             是否全部发送成功
         """
         import time
         
-        def get_bytes(s: str) -> int:
-            """获取字符串的 UTF-8 字节数"""
-            return len(s.encode('utf-8'))
+        # 根据发送格式选择字节计数方式（markdown -> 原始字节; text -> 转为纯文本后计字节）
+        if self._wechat_message_format == 'markdown':
+            def get_bytes(s: str) -> int:
+                """获取字符串的 UTF-8 字节数（Markdown 原始字节）"""
+                return len(s.encode('utf-8'))
+            def to_send(s: str) -> str:
+                return s
+        else:
+            def get_bytes(s: str) -> int:
+                """获取字符串的 UTF-8 字节数（以最终发送的纯文本为准）"""
+                return len(self._markdown_to_plaintext(s).encode('utf-8'))
+            def to_send(s: str) -> str:
+                return self._markdown_to_plaintext(s)
         
         # 智能分割：优先按 "---" 分隔（股票之间的分隔线）
         # 其次尝试各级标题分割
@@ -1248,9 +1277,12 @@ class NotificationService:
         logger.info(f"企业微信分批发送：共 {total_chunks} 批")
         
         for i, chunk in enumerate(chunks):
-            # 添加分页标记
+            # 添加分页标记（根据发送格式调整样式）
             if total_chunks > 1:
-                page_marker = f"\n\n📄 *({i+1}/{total_chunks})*"
+                if self._wechat_message_format == 'markdown':
+                    page_marker = f"\n\n📄 *({i+1}/{total_chunks})*"
+                else:
+                    page_marker = f"\n\n📄 ({i+1}/{total_chunks})"
                 chunk_with_marker = chunk + page_marker
             else:
                 chunk_with_marker = chunk
@@ -1288,7 +1320,13 @@ class NotificationService:
         
         for line in lines:
             test_chunk = current_chunk + ('\n' if current_chunk else '') + line
-            if len(test_chunk.encode('utf-8')) > max_bytes - 100:  # 预留空间给分页标记
+            # 根据发送格式选择计字节方式
+            if self._wechat_message_format == 'markdown':
+                too_long = len(test_chunk.encode('utf-8')) > max_bytes - 100
+            else:
+                too_long = len(self._markdown_to_plaintext(test_chunk).encode('utf-8')) > max_bytes - 100
+
+            if too_long:
                 if current_chunk:
                     chunks.append(current_chunk)
                 current_chunk = line
@@ -1304,7 +1342,13 @@ class NotificationService:
         logger.info(f"企业微信强制分批发送：共 {total_chunks} 批")
         
         for i, chunk in enumerate(chunks):
-            page_marker = f"\n\n📄 *({i+1}/{total_chunks})*" if total_chunks > 1 else ""
+            if total_chunks > 1:
+                if self._wechat_message_format == 'markdown':
+                    page_marker = f"\n\n📄 *({i+1}/{total_chunks})*"
+                else:
+                    page_marker = f"\n\n📄 ({i+1}/{total_chunks})"
+            else:
+                page_marker = ""
             
             try:
                 if self._send_wechat_message(chunk + page_marker):
@@ -1343,14 +1387,26 @@ class NotificationService:
         return ""
     
     def _send_wechat_message(self, content: str) -> bool:
-        """发送企业微信消息"""
-        payload = {
-            "msgtype": "markdown",
-            "markdown": {
-                "content": content
+        """发送企业微信消息（支持 Markdown 或 纯文本，两种 msgtype）"""
+        # 根据配置决定 payload 类型：markdown 或 text
+        if self._wechat_message_format == 'markdown':
+            payload = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "content": content
+                }
             }
-        }
+        else:
+            # 确保内容为纯文本（容错：支持传入已转换或未转换的 Markdown）
+            text_content = self._markdown_to_plaintext(content)
+            payload = {
+                "msgtype": "text",
+                "text": {
+                    "content": text_content
+                }
+            }
         
+        logger.debug(f"企业微信请求 payload 长度: {len(json.dumps(payload, ensure_ascii=False).encode('utf-8'))} 字节")
         response = requests.post(
             self._wechat_url,
             json=payload,
@@ -1694,6 +1750,70 @@ class NotificationService:
             _flush_table_rows(table_buffer, lines)
 
         return "\n".join(lines).strip()
+    
+    def _markdown_to_plaintext(self, markdown_text: str) -> str:
+        """
+        将 Markdown 转换为尽可能干净的纯文本（用于企业微信发送）。
+        - 移除标题、加粗、斜体、代码标记
+        - 将表格转换为“列: 值 | 列: 值”形式
+        - 将引用、列表等转换为易读的纯文本
+        """
+        if not markdown_text:
+            return ""
+        out_lines: List[str] = []
+        table_buffer: List[str] = []
+        for raw in markdown_text.splitlines():
+            line = raw.rstrip()
+            # 表格收集
+            if line.strip().startswith('|'):
+                table_buffer.append(line)
+                continue
+            # 如果之前有表格缓存，先处理它
+            if table_buffer:
+                # 解析表格头和数据行
+                header = [c.strip() for c in table_buffer[0].strip().strip('|').split('|')]
+                for row in table_buffer[1:]:
+                    if re.match(r'^\s*\|?\s*[:-]+\s*(\|\s*[:-]+\s*)+\|?\s*$', row):
+                        continue
+                    cells = [c.strip() for c in row.strip().strip('|').split('|')]
+                    pairs = []
+                    for i, cell in enumerate(cells):
+                        key = header[i] if i < len(header) else f"列{i+1}"
+                        pairs.append(f"{key}: {cell}")
+                    out_lines.append(' | '.join(pairs))
+                table_buffer = []
+            # 标题 / 引用 / 列表 / 分隔线
+            if re.match(r'^#{1,6}\s+', line):
+                line = re.sub(r'^#{1,6}\s+', '', line).strip()
+            elif line.startswith('> '):
+                line = line[2:].strip()
+            elif line.strip() == '---':
+                line = '---'
+            elif re.match(r'^\s*-\s+', line):
+                line = re.sub(r'^\s*-\s+', '• ', line)
+            # 内联格式去除
+            line = re.sub(r'`([^`]+)`', r'\1', line)
+            line = re.sub(r'\*\*(.*?)\*\*', r'\1', line)
+            line = re.sub(r'__(.*?)__', r'\1', line)
+            line = re.sub(r'\*(.*?)\*', r'\1', line)
+            line = re.sub(r'\[(.*?)\]\((.*?)\)', r'\1 (\2)', line)
+            out_lines.append(line)
+        # 处理尾部残留表格
+        if table_buffer:
+            header = [c.strip() for c in table_buffer[0].strip().strip('|').split('|')]
+            for row in table_buffer[1:]:
+                if re.match(r'^\s*\|?\s*[:-]+\s*(\|\s*[:-]+\s*)+\|?\s*$', row):
+                    continue
+                cells = [c.strip() for c in row.strip().strip('|').split('|')]
+                pairs = []
+                for i, cell in enumerate(cells):
+                    key = header[i] if i < len(header) else f"列{i+1}"
+                    pairs.append(f"{key}: {cell}")
+                out_lines.append(' | '.join(pairs))
+        text = '\n'.join(out_lines)
+        # 清理多余空行
+        text = re.sub(r'\n{3,}', '\n\n', text).strip()
+        return text
     
     def send_to_email(self, content: str, subject: Optional[str] = None) -> bool:
         """

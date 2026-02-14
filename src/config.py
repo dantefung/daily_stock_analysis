@@ -107,6 +107,8 @@ class Config:
     # 消息长度限制（字节）- 超长自动分批发送
     feishu_max_bytes: int = 20000  # 飞书限制约 20KB，默认 20000 字节
     wechat_max_bytes: int = 4000   # 企业微信限制 4096 字节，默认 4000 字节
+    # 企业微信消息发送格式：'text'（纯文本）或 'markdown'，默认 'text'
+    wechat_message_format: str = "text"  # 可通过 WECHAT_MESSAGE_FORMAT 环境变量设置
     
     # === 数据库配置 ===
     database_path: str = "./data/stock_analysis.db"
@@ -324,6 +326,7 @@ class Config:
             analysis_delay=float(os.getenv('ANALYSIS_DELAY', '0')),
             feishu_max_bytes=int(os.getenv('FEISHU_MAX_BYTES', '20000')),
             wechat_max_bytes=int(os.getenv('WECHAT_MAX_BYTES', '4000')),
+            wechat_message_format=os.getenv('WECHAT_MESSAGE_FORMAT', 'text').lower(),
             database_path=os.getenv('DATABASE_PATH', './data/stock_analysis.db'),
             log_dir=os.getenv('LOG_DIR', './logs'),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
